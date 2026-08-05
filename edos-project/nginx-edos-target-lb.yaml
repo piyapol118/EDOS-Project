@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-edos-target
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-gateway-backend
+  template:
+    metadata:
+      labels:
+        app: nginx-gateway-backend
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9901"
+        prometheus.io/path: "/stats/prometheus"
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 80
+        lifecycle:
+          postStart:
+            exec:
+              command:
+              - "bash"
+              - "-c"
+              - |
+                mkdir -p /usr/share/nginx/html/heavy-logic
+                echo "<html><head><title>EDoS Heavy Page</title></head><body><h1>Dumping Data...</h1>" > /usr/share/nginx/html/heavy-logic/index.html
+                for i in {1..5000}; do
+                  echo "<p>[$i] KMITL_DEVOPS_INTERN_INOX_PROJECT_EDOS_ATTACK_TEST_DATA_LOAD_OVERHEAD_STREAMING_DATA</p>" >> /usr/share/nginx/html/heavy-logic/index.html
+                done
+                echo "</body></html>" >> /usr/share/nginx/html/heavy-logic/index.html
+
+                echo "gzip on;" > /etc/nginx/conf.d/gzip.conf
+                echo "gzip_comp_level 9;" >> /etc/nginx/conf.d/gzip.conf
+                echo "gzip_types text/plain text/html text/css application/javascript;" >> /etc/nginx/conf.d/gzip.conf
+                echo "gzip_min_length 100;" >> /etc/nginx/conf.d/gzip.conf
+                echo "gzip_vary on;" >> /etc/nginx/conf.d/gzip.conf
+
+                sed -i 's/worker_connections.*/worker_connections 10240;/g' /etc/nginx/nginx.conf
+                nginx -s reload
+        resources:
+          requests:
+            cpu: "100m"
+          limits:
+            cpu: "200m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-backend-service
+  namespace: default
+spec:
+  selector:
+    app: nginx-gateway-backend
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+  type: ClusterIP

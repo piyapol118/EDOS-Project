@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: entropy-detector-sa
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: entropy-detector-role
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "configmaps"]
+    verbs: ["get", "list", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: entropy-detector-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: entropy-detector-role
+subjects:
+  - kind: ServiceAccount
+    name: entropy-detector-sa
+    namespace: default
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: entropy-detector
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: entropy-detector
+  template:
+    metadata:
+      labels:
+        app: entropy-detector
+    spec:
+      serviceAccountName: entropy-detector-sa
+      containers:
+      - name: entropy-detector
+        image: entropy-detector:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: INTERVAL_SECONDS
+          value: "30"
+        - name: ENTROPY_LOWER_THRESHOLD
+          value: "0"
+        - name: ENVOY_POD_LABEL
+          value: "app=nginx-sidecar-target"
+        - name: ENVOY_CONTAINER
+          value: "envoy-sidecar"
+        - name: NAMESPACE
+          value: "default"
+        - name: LOG_LEVEL
+          value: "INFO"
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "300m"
+            memory: "256Mi"
+        volumeMounts:
+        - name: data-volume
+          mountPath: /data
+      volumes:
+      - name: data-volume
+        emptyDir: {}

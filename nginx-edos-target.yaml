@@ -1,0 +1,203 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-edos-sidecar-target
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-sidecar-target
+  template:
+    metadata:
+      labels:
+        app: nginx-sidecar-target
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9901"
+        prometheus.io/path: "/stats/prometheus"
+    spec:
+      containers:
+      - name: crypto-backend-app
+        image: node:20-slim
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 80
+        command:
+        - "sh"
+        - "-c"
+        - |
+          cat << 'EOF' > server.js
+          const http = require('http');
+          const crypto = require('crypto');
+          const { webcrypto } = crypto;
+
+          let mockKeyPair;
+
+          const SCRYPT_SALT = 'static_salt_data';
+          const SCRYPT_OPTS = { N: 16384, r: 8, p: 1 };
+
+          function hashPassword(password) {
+              return crypto.scryptSync(password, SCRYPT_SALT, 64, SCRYPT_OPTS);
+          }
+
+          const userStore = new Map([
+              ['demo_user', hashPassword('demo_password_123')],
+              ['test_agent', hashPassword('test_pass_456')],
+          ]);
+
+          async function initCrypto() {
+              mockKeyPair = await webcrypto.subtle.generateKey(
+                  { name: "ECDSA", namedCurve: "P-256" },
+                  true,
+                  ["sign", "verify"]
+              );
+              console.log("Real ECDSA Keypair generated successfully.");
+          }
+
+          const server = http.createServer(async (req, res) => {
+              if (req.method === 'GET' && req.url === '/') {
+                  res.writeHead(200, { 'Content-Type': 'text/html' });
+                  res.end(`
+                    <html>
+                      <head><title>EDoS Testbed - Auth Gateway</title></head>
+                      <body>
+                        <h1>Crypto Backend Auth Service</h1>
+                        <p>Status: running</p>
+                        <p>Endpoints:</p>
+                        <ul>
+                          <li>POST /api/verify-pin-keypair (ECDSA challenge-response)</li>
+                          <li>POST /api/login-simple (username + password hash only)</li>
+                        </ul>
+                      </body>
+                    </html>
+                  `);
+
+              } else if (req.method === 'POST' && req.url === '/api/login-simple') {
+                  let body = '';
+                  req.on('data', chunk => { body += chunk.toString(); });
+                  req.on('end', () => {
+                      try {
+                          const payload = JSON.parse(body);
+                          const username = payload.username || '';
+                          const password = payload.password || '';
+
+                          const inputHash = hashPassword(password);
+                          const storedHash = userStore.get(username);
+
+                          const isValid = storedHash
+                              ? crypto.timingSafeEqual(inputHash, storedHash)
+                              : false;
+
+                          if (isValid) {
+                              res.writeHead(200, { 'Content-Type': 'application/json' });
+                              res.end(JSON.stringify({
+                                  status: 'ok',
+                                  username,
+                                  token: 'simple-session-token'
+                              }));
+                          } else {
+                              res.writeHead(401, { 'Content-Type': 'application/json' });
+                              res.end(JSON.stringify({ error: 'invalid_credentials' }));
+                          }
+                      } catch (err) {
+                          res.writeHead(400, { 'Content-Type': 'application/json' });
+                          res.end(JSON.stringify({ error: 'bad_request' }));
+                      }
+                  });
+
+              } else if (req.method === 'POST' && req.url === '/api/verify-pin-keypair') {
+                  let body = '';
+                  req.on('data', chunk => { body += chunk.toString(); });
+                  req.on('end', async () => {
+                      try {
+                          const payload = JSON.parse(body);
+
+                          const dummyData = new TextEncoder().encode(payload.challenge || "default_challenge");
+                          const dummySig = Buffer.from(payload.signature || "", 'base64');
+
+                          await webcrypto.subtle.verify(
+                              { name: "ECDSA", hash: "SHA-256" },
+                              mockKeyPair.publicKey,
+                              dummySig,
+                              dummyData
+                          ).catch(() => {});
+
+                          crypto.scryptSync(payload.agentCode || "anonymous", SCRYPT_SALT, 64, SCRYPT_OPTS);
+
+                          res.writeHead(200, { 'Content-Type': 'application/json' });
+                          res.end(JSON.stringify({
+                              token: "real-computed-session-token",
+                              type: "agent",
+                              nextPage: "/dashboard"
+                          }));
+
+                      } catch (err) {
+                          res.writeHead(400, { 'Content-Type': 'application/json' });
+                          res.end(JSON.stringify({ error: "bad_request" }));
+                      }
+                  });
+
+              } else {
+                  res.writeHead(404);
+                  res.end();
+              }
+          });
+
+          initCrypto().then(() => {
+              server.listen(80, '0.0.0.0', () => {
+                  console.log("Auth Server running on port 80 (login-simple + verify-pin-keypair)");
+              });
+          });
+          EOF
+          node server.js
+        resources:
+          requests:
+            cpu: "100m"
+          limits:
+            cpu: "200m"
+
+      - name: envoy-sidecar
+        image: envoyproxy/envoy:v1.30.1
+        ports:
+        - containerPort: 10000
+        - containerPort: 9901
+          name: metrics
+        resources:
+          requests:
+            cpu: "100m"
+          limits:
+            cpu: "200m"
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/envoy
+        - name: certs-volume
+          mountPath: /etc/envoy/certs
+          readOnly: true
+
+      volumes:
+      - name: config-volume
+        configMap:
+          name: envoy-sidecar-config
+      - name: certs-volume
+        secret:
+          secretName: envoy-certs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-sidecar-service
+spec:
+  externalTrafficPolicy: Local
+  selector:
+    app: nginx-sidecar-target
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 10000
+      nodePort: 32001
+    - name: metrics
+      protocol: TCP
+      port: 9901
+      targetPort: 9901
+  type: LoadBalancer
