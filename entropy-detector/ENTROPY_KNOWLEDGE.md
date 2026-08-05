@@ -168,7 +168,7 @@ entropy-detector (1 pod)
     4. Block attacker IPs
 ```
 
-### 4.2 Data Flow
+### 4.2 Data Flow & Enforcement Mechanism
 
 ```
 Envoy Access Log (JSON) -> kubectl logs -> Entropy Service
@@ -190,9 +190,21 @@ Envoy Access Log (JSON) -> kubectl logs -> Entropy Service
                                   +-----+-----+    |
                                         |          |
                                   +-----v-----+    |
-                                  | Block IPs |    |
-                                  +-----------+    |
-                                        OK Normal Traffic
+                                  | Attacker  |    |
+                                  | Detected  |    |
+                                  +-----+-----+    |
+                                        |          |
+                           +------------v------------+
+                           |   Has NEW Attacker IP?  |
+                           +-----+-------------+-----+
+                             Yes |             | No
+                +────────────────v─+         +─v────────────────────────+
+                | 1. Update Envoy  |         | Skip Rollout Restart     |
+                |    ConfigMap RBAC|         | (Prevent pod disruption) |
+                | 2. Rollout       |         +──────────────────────────+
+                |    Restart Envoy |
+                |    (403 Block)   |
+                +──────────────────+
 ```
 
 ---
