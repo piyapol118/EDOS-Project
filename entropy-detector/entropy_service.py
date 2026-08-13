@@ -531,7 +531,18 @@ def main():
         logger.info("Normalized Entropy: %.4f (0=concentrated, 1=uniform)", norm_entropy)
 
         # 4. อัพเดท history และคำนวณ dynamic threshold
-        entropy_history.append(norm_entropy)
+        # กรอง: เฉพาะ intervals ที่มี traffic เพียงพอเท่านั้นจึงจะเข้า history
+        # ป้องกันไม่ให้ intervals ที่ traffic เบาบาง (เช่น ช่วง cold start) มาปนเปื้อนค่า β_lower
+        MIN_IPS_FOR_HISTORY = int(os.environ.get("MIN_IPS_FOR_HISTORY", "5"))
+        MIN_REQUESTS_FOR_HISTORY = int(os.environ.get("MIN_REQUESTS_FOR_HISTORY", "30"))
+
+        if n_unique_ips >= MIN_IPS_FOR_HISTORY and total_requests >= MIN_REQUESTS_FOR_HISTORY:
+            entropy_history.append(norm_entropy)
+            logger.info("Added to history (IPs=%d, reqs=%d). History size: %d",
+                        n_unique_ips, total_requests, len(entropy_history))
+        else:
+            logger.warning("Skipped history update: insufficient traffic (IPs=%d < %d or reqs=%d < %d)",
+                           n_unique_ips, MIN_IPS_FOR_HISTORY, total_requests, MIN_REQUESTS_FOR_HISTORY)
 
         # เก็บแค่ 20 intervals ล่าสุด
         if len(entropy_history) > 20:

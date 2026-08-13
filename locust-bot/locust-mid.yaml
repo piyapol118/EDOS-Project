@@ -1,0 +1,75 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: locust-medium-script
+  namespace: default
+data:
+  locustfile.py: |
+    import random
+    import string
+    from locust import HttpUser, task, between
+
+    def random_username(n=8):
+        return ''.join(random.choices(string.ascii_lowercase + string.digits, k=n))
+
+    class EdosAttackUser(HttpUser):
+        wait_time = between(0.3, 0.8)
+        connection_timeout = 30.0
+        network_timeout = 30.0
+
+        @task
+        def attack_login_simple(self):
+            payload = {
+                "username": random_username(),
+                "password": random_username(12),
+            }
+            with self.client.post(
+                "/api/login-simple",
+                json=payload,
+                verify=False,
+                catch_response=True,
+            ) as resp:
+                if resp.status_code in (401, 200):
+                    resp.success()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: locust-medium-bot
+  namespace: default
+spec:
+  replicas: 25
+  selector:
+    matchLabels:
+      app: locust-medium-bot
+  template:
+    metadata:
+      labels:
+        app: locust-medium-bot
+    spec:
+      containers:
+      - name: locust
+        image: locustio/locust:2.31.1
+        imagePullPolicy: IfNotPresent
+        args:
+          - "-f"
+          - "/config/locustfile.py"
+          - "--host=https://nginx-sidecar-service:80"
+          - "--headless"
+          - "--users=3"
+          - "--spawn-rate=1"
+          - "--run-time=5m"
+        volumeMounts:
+        - name: locust-medium-script
+          mountPath: /config
+        resources:
+          requests:
+            cpu: "30m"
+            memory: "48Mi"
+          limits:
+            cpu: "80m"
+            memory: "96Mi"
+      volumes:
+      - name: locust-medium-script
+        configMap:
+          name: locust-medium-script

@@ -1,0 +1,93 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: locust-mid-yoyo-script
+  namespace: default
+data:
+  locustfile.py: |
+    import random
+    import string
+    from locust import HttpUser, task, between, LoadTestShape
+
+    def random_username(n=8):
+        return ''.join(random.choices(string.ascii_lowercase + string.digits, k=n))
+
+    class MidYoYoUser(HttpUser):
+        wait_time = between(0.3, 0.8)
+        connection_timeout = 30.0
+        network_timeout = 30.0
+
+        @task
+        def attack_login_simple(self):
+            payload = {
+                "username": random_username(),
+                "password": random_username(12),
+            }
+            with self.client.post(
+                "/api/login-simple",
+                json=payload,
+                verify=False,
+                catch_response=True,
+            ) as resp:
+                if resp.status_code in (401, 200):
+                    resp.success()
+
+    class YoYoShape(LoadTestShape):
+        """
+        Yo-Yo Pattern for Medium Bots:
+        - Cycle Time: 120 seconds
+        - ON Phase (0s - 80s): 3 users per pod (Medium rate attack)
+        - OFF Phase (80s - 120s): 0 users (Cooldown phase)
+        """
+        CYCLE_TIME = 120
+        ON_DURATION = 80
+        TARGET_USERS = 3
+
+        def tick(self):
+            run_time = self.get_run_time()
+            current_step = int(run_time) % self.CYCLE_TIME
+
+            if current_step < self.ON_DURATION:
+                return (self.TARGET_USERS, 2)  # (target_users, spawn_rate)
+            else:
+                return (0, 2)                  # Stop traffic during OFF phase
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: locust-mid-yoyo
+  namespace: default
+spec:
+  replicas: 35
+  selector:
+    matchLabels:
+      app: locust-mid-yoyo
+  template:
+    metadata:
+      labels:
+        app: locust-mid-yoyo
+    spec:
+      containers:
+      - name: locust
+        image: locustio/locust:2.31.1
+        imagePullPolicy: IfNotPresent
+        args:
+          - "-f"
+          - "/config/locustfile.py"
+          - "--host=https://nginx-sidecar-service:80"
+          - "--headless"
+          - "--run-time=15m"
+        volumeMounts:
+        - name: locust-script
+          mountPath: /config
+        resources:
+          requests:
+            cpu: "25m"
+            memory: "48Mi"
+          limits:
+            cpu: "60m"
+            memory: "96Mi"
+      volumes:
+      - name: locust-script
+        configMap:
+          name: locust-mid-yoyo-script
