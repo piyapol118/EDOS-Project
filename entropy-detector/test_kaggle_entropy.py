@@ -197,12 +197,13 @@ def evaluate_dataset(file_path: str):
             std_h = np.std(entropy_history[-20:])
             beta_lower = max(mean_h - (STD_MULTIPLIER * std_h), 0.1)
 
-        cluster_res = cluster_users_kmeans(ip_counts)
-        kmeans_attackers_count = len(cluster_res["attackers"])
-
-        entropy_attack_flag = h_norm < beta_lower
-        kmeans_attack_flag = kmeans_attackers_count >= 5
-        is_detected_attack = entropy_attack_flag or kmeans_attack_flag
+        is_detected_attack = h_norm < beta_lower
+        kmeans_attackers_count = 0
+        if is_detected_attack: #เอา ip จัดกลุ่ม kmeans แล้วนับ attacker ใน attackers cluster
+            cluster_res = cluster_users_kmeans(ip_counts) 
+            kmeans_attackers_count = len(cluster_res["attackers"])
+        else:
+            kmeans_attackers_count = 0
 
         actual_label = "Benign"
         if label_col:

@@ -530,7 +530,24 @@ def main():
         logger.info("Max possible Entropy: %.4f", max_entropy)
         logger.info("Normalized Entropy: %.4f (0=concentrated, 1=uniform)", norm_entropy)
 
-        # 4. คำนวณ dynamic threshold จากประวัติที่มีอยู่ก่อนหน้า
+        # 4. อัพเดท history และคำนวณ dynamic threshold
+        # กรอง: เฉพาะ intervals ที่มี traffic เพียงพอเท่านั้นจึงจะเข้า history
+        # ป้องกันไม่ให้ intervals ที่ traffic เบาบาง (เช่น ช่วง cold start) มาปนเปื้อนค่า β_lower
+        MIN_IPS_FOR_HISTORY = int(os.environ.get("MIN_IPS_FOR_HISTORY", "5"))
+        MIN_REQUESTS_FOR_HISTORY = int(os.environ.get("MIN_REQUESTS_FOR_HISTORY", "30"))
+
+        if n_unique_ips >= MIN_IPS_FOR_HISTORY and total_requests >= MIN_REQUESTS_FOR_HISTORY:
+            entropy_history.append(norm_entropy)
+            logger.info("Added to history (IPs=%d, reqs=%d). History size: %d",
+                        n_unique_ips, total_requests, len(entropy_history))
+        else:
+            logger.warning("Skipped history update: insufficient traffic (IPs=%d < %d or reqs=%d < %d)",
+                           n_unique_ips, MIN_IPS_FOR_HISTORY, total_requests, MIN_REQUESTS_FOR_HISTORY)
+
+        # เก็บแค่ 20 intervals ล่าสุด
+        if len(entropy_history) > 20:
+            entropy_history = entropy_history[-20:]
+
         if ENTROPY_LOWER_THRESHOLD > 0:
             beta_lower = ENTROPY_LOWER_THRESHOLD
             logger.info("Using fixed β_lower: %.4f", beta_lower)
@@ -541,25 +558,6 @@ def main():
 
         # 5. ตรวจสอบว่าเป็นการโจมตีหรือไม่
         is_attack = norm_entropy < beta_lower
-
-        # 6. อัปเดต history เฉพาะช่วง Normal Traffic เท่านั้น (ไม่ปนเปื้อนช่วง attack)
-        MIN_IPS_FOR_HISTORY = int(os.environ.get("MIN_IPS_FOR_HISTORY", "5"))
-        MIN_REQUESTS_FOR_HISTORY = int(os.environ.get("MIN_REQUESTS_FOR_HISTORY", "30"))
-
-        if not is_attack and n_unique_ips >= MIN_IPS_FOR_HISTORY and total_requests >= MIN_REQUESTS_FOR_HISTORY:
-            entropy_history.append(norm_entropy)
-            logger.info("Added to normal history (IPs=%d, reqs=%d). History size: %d",
-                        n_unique_ips, total_requests, len(entropy_history))
-        else:
-            if is_attack:
-                logger.warning("Skipped history update: ATTACK DETECTED (h_norm=%.4f < beta_lower=%.4f)", norm_entropy, beta_lower)
-            else:
-                logger.warning("Skipped history update: insufficient traffic (IPs=%d < %d or reqs=%d < %d)",
-                               n_unique_ips, MIN_IPS_FOR_HISTORY, total_requests, MIN_REQUESTS_FOR_HISTORY)
-
-        # เก็บแค่ 20 intervals ล่าสุด
-        if len(entropy_history) > 20:
-            entropy_history = entropy_history[-20:]
 
         if is_attack:
             logger.warning("⚠️  ATTACK DETECTED! Normalized Entropy %.4f < β_lower %.4f",
