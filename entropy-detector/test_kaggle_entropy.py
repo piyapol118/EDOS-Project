@@ -1,22 +1,5 @@
 """
 Kaggle / CIC-IDS2017 Dataset Entropy Evaluator (Time-Based Interval, v2)
-
-การแก้ไขจาก v1:
-- v1 แบ่ง interval ด้วยการหาร "จำนวน row" ออกเป็น 100 ก้อนเท่ากัน
-  ซึ่งไม่ตรงกับ interval size T (วินาที) ที่ paper (PMC11300888) กำหนดไว้เลย
-  ทำให้แต่ละ "interval" ครอบคลุมช่วงเวลาไม่เท่ากัน (ช่วง traffic หนาแน่น
-  vs เบาบาง ได้ interval ที่ความยาวเวลาต่างกันมาก) ผลลัพธ์จึงไม่สม่ำเสมอ
-
-- v2 แบ่ง interval ตาม Timestamp column จริง เป็นช่วงเวลาเท่ากันตาม
-  INTERVAL_SECONDS ที่กำหนด (ตรงกับหลักการ "sliding window ขนาด T" ของ paper)
-
-ข้อจำกัดที่ต้องรู้ (สำคัญ อ่านก่อนตีความผลลัพธ์):
-  ไฟล์ CIC-IDS2017 นี้มี Timestamp ละเอียดแค่ระดับ "นาที" เท่านั้น
-  (มีแค่ 93 ค่าไม่ซ้ำจาก 225,745 rows) ไม่ใช่ระดับวินาที
-  ดังนั้น INTERVAL_SECONDS < 60 จะไม่มีความหมายจริงกับไฟล์นี้ —
-  ถ้าอยาก interval ละเอียดกว่านาที ต้องใช้ dataset ที่มี timestamp
-  ระดับวินาทีจริง (เช่น pcap ดิบ หรือ dataset อื่นที่ resolution สูงกว่า)
-  สคริปต์นี้จะเตือนอัตโนมัติถ้าเจอ timestamp resolution หยาบกว่าที่ตั้งไว้
 """
 
 import os
