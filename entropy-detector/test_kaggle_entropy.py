@@ -240,7 +240,8 @@ def evaluate_dataset(file_path: str):
             "actual_label": actual_label,
         })
 
-        if n_unique_ips >= MIN_IPS_FOR_HISTORY and total_reqs >= MIN_REQUESTS_FOR_HISTORY:
+        # อัปเดตประวัติเฉพาะช่วง Normal Traffic เท่านั้น (ไม่ปนเปื้อนช่วง Attack)
+        if not is_detected_attack and n_unique_ips >= MIN_IPS_FOR_HISTORY and total_reqs >= MIN_REQUESTS_FOR_HISTORY:
             entropy_history.append(h_norm)
             if len(entropy_history) > 20:
                 entropy_history = entropy_history[-20:]
