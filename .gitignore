@@ -1,2 +1,8 @@
 .env
-node_modules
+node_modules/
+__pycache__/
+*.pyc
+
+# Datasets
+entropy-detector/Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv
+entropy-detector/bccc-cpacket-cloud-ddos-2024-merged.parquet
