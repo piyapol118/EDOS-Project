@@ -19,6 +19,8 @@ import time
 import os
 import subprocess
 import logging
+import threading
+import http.server
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
@@ -314,167 +316,73 @@ def load_blocked_ips() -> list:
     return []
 
 
-# เก็บรายชื่อ IP ที่ถูกอัปเดตลง Envoy RBAC ไปแล้ว เพื่อไม่ให้สั่ง rollout restart ซ้ำ
-applied_blocked_ips = set()
+# ─── HTTP API Server (สำหรับ Envoy Lua httpCall) ─────────────
+# Envoy Lua filter จะเรียก GET /api/blocked-ips ทุก 10 วินาที
+# เพื่อดึงรายชื่อ IP ที่ต้องบล็อก → ไม่ต้อง restart pod อีกต่อไป
+
+HTTP_PORT = int(os.environ.get("HTTP_PORT", "8080"))
+
+# Thread-safe blocked IPs store
+_blocked_ips_lock = threading.Lock()
+_blocked_ips_set = set()
 
 
-def load_currently_applied_ips_from_configmap() -> set:
-    """อ่านรายชื่อ IP ที่มีอยู่ใน Envoy ConfigMap ปัจจุบัน"""
-    configmap_name = os.environ.get("ENVOY_CONFIGMAP", "envoy-sidecar-config")
-    existing_ips = set()
-    try:
-        cmd_get = ["kubectl", "get", "configmap", configmap_name, "-n", NAMESPACE, "-o", "json"]
-        res = subprocess.run(cmd_get, capture_output=True, text=True, timeout=15)
-        if res.returncode == 0:
-            cm_data = json.loads(res.stdout)
-            envoy_yaml_raw = cm_data.get("data", {}).get("envoy.yaml", "")
-            if envoy_yaml_raw:
-                import yaml
-                envoy_config = yaml.safe_load(envoy_yaml_raw)
-                listeners = envoy_config.get("static_resources", {}).get("listeners", [])
-                for listener in listeners:
-                    for chain in listener.get("filter_chains", []):
-                        for f in chain.get("filters", []):
-                            if f.get("name") == "envoy.filters.network.http_connection_manager":
-                                for hf in f.get("typed_config", {}).get("http_filters", []):
-                                    if hf.get("name") == "envoy.filters.http.rbac":
-                                        policies = hf.get("typed_config", {}).get("rules", {}).get("policies", {})
-                                        for pol in policies.values():
-                                            for p in pol.get("principals", []):
-                                                prefix = p.get("remote_ip", {}).get("address_prefix")
-                                                if prefix:
-                                                    existing_ips.add(prefix)
-    except Exception as e:
-        logger.warning("Could not pre-load applied IPs from ConfigMap: %s", e)
-    return existing_ips
+def update_blocked_ips(ips: set):
+    """อัปเดต blocked IPs ที่ HTTP API จะตอบกลับให้ Envoy Lua"""
+    global _blocked_ips_set
+    with _blocked_ips_lock:
+        _blocked_ips_set = set(ips)
+    logger.info("🔄 Updated HTTP API blocked IPs: %d IPs", len(ips))
 
 
-def apply_envoy_rbac_block(blocked_ips: list):
-    """
-    นำรายชื่อ blocked_ips ไปเพิ่มใน Envoy Sidecar ConfigMap (envoy.filters.http.rbac)
-    และสั่ง rollout restart เฉพาะเมื่อมี IP ใหม่ที่ยังไม่เคยโดนบล็อกเท่านั้น!
-    """
-    global applied_blocked_ips
+def get_blocked_ips_for_api() -> list:
+    """ดึง blocked IPs ปัจจุบัน (thread-safe)"""
+    with _blocked_ips_lock:
+        return sorted(list(_blocked_ips_set))
 
-    if not blocked_ips:
-        return
 
-    # เช็คว่ามี IP ใหม่จริงหรือไม่
-    new_ips = set(blocked_ips) - applied_blocked_ips
-    if not new_ips:
-        logger.info("ℹ️ IPs %s already blocked in Envoy. Skipping rollout restart.", blocked_ips)
-        return
+class BlockedIPsHandler(http.server.BaseHTTPRequestHandler):
+    """HTTP handler สำหรับ Envoy Lua httpCall"""
 
-    logger.info("🚫 Found %d NEW IPs to block: %s. Updating Envoy RBAC...", len(new_ips), list(new_ips))
-
-    configmap_name = os.environ.get("ENVOY_CONFIGMAP", "envoy-sidecar-config")
-    target_deployment = os.environ.get("TARGET_DEPLOYMENT", "nginx-edos-sidecar-target")
-
-    try:
-        # 1. ดึง ConfigMap ปัจจุบัน
-        cmd_get = ["kubectl", "get", "configmap", configmap_name, "-n", NAMESPACE, "-o", "json"]
-        res = subprocess.run(cmd_get, capture_output=True, text=True, timeout=15)
-        if res.returncode != 0:
-            logger.error("Failed to fetch ConfigMap %s: %s", configmap_name, res.stderr)
-            return
-
-        cm_data = json.loads(res.stdout)
-        envoy_yaml_raw = cm_data.get("data", {}).get("envoy.yaml", "")
-        if not envoy_yaml_raw:
-            logger.error("No envoy.yaml found in ConfigMap %s", configmap_name)
-            return
-
-        # 2. Parse YAML
-        import yaml
-        envoy_config = yaml.safe_load(envoy_yaml_raw)
-
-        # รวม IP เก่าและ IP ใหม่ทั้งหมด
-        all_target_ips = sorted(list(applied_blocked_ips.union(set(blocked_ips))))
-
-        # 3. สร้าง RBAC filter principals
-        principals = []
-        for ip in all_target_ips:
-            clean_ip = ip.split("/")[0]
-            principals.append({
-                "remote_ip": {
-                    "address_prefix": clean_ip,
-                    "prefix_len": 32
-                }
-            })
-
-        rbac_filter = {
-            "name": "envoy.filters.http.rbac",
-            "typed_config": {
-                "@type": "type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBAC",
-                "rules": {
-                    "action": "DENY",
-                    "policies": {
-                        "entropy_blocked_attackers": {
-                            "permissions": [{"any": True}],
-                            "principals": principals
-                        }
-                    }
-                }
+    def do_GET(self):
+        if self.path == "/api/blocked-ips":
+            ips = get_blocked_ips_for_api()
+            data = {
+                "blocked_ips": ips,
+                "count": len(ips),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
             }
-        }
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode())
 
-        # 4. ค้นหา http_filters ใน envoy_config
-        listeners = envoy_config.get("static_resources", {}).get("listeners", [])
-        updated = False
-        for listener in listeners:
-            filter_chains = listener.get("filter_chains", [])
-            for chain in filter_chains:
-                filters = chain.get("filters", [])
-                for f in filters:
-                    if f.get("name") == "envoy.filters.network.http_connection_manager":
-                        http_filters = f.get("typed_config", {}).get("http_filters", [])
+        elif self.path == "/health":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"ok")
 
-                        # ลบ rbac filter เก่าถ้ามีอยู่แล้ว
-                        http_filters = [hf for hf in http_filters if hf.get("name") != "envoy.filters.http.rbac"]
-
-                        # แทรก rbac filter เป็นตัวแรกสุด
-                        http_filters.insert(0, rbac_filter)
-
-                        f["typed_config"]["http_filters"] = http_filters
-                        updated = True
-
-        if not updated:
-            logger.error("Could not locate http_connection_manager in envoy.yaml")
-            return
-
-        # 5. แปลงกลับเป็น YAML string และอัปเดต ConfigMap
-        updated_yaml_str = yaml.dump(envoy_config, default_flow_style=False)
-        cm_data["data"]["envoy.yaml"] = updated_yaml_str
-
-        # เขียน JSON ชั่วคราวไปอัปเดต
-        temp_cm_file = "/tmp/updated_cm.json"
-        with open(temp_cm_file, "w") as tf:
-            json.dump(cm_data, tf)
-
-        cmd_apply = ["kubectl", "apply", "-f", temp_cm_file]
-        res_apply = subprocess.run(cmd_apply, capture_output=True, text=True, timeout=15)
-        if res_apply.returncode == 0:
-            logger.info("Successfully updated Envoy ConfigMap with %d blocked IPs!", len(all_target_ips))
-
-            # อัปเดตชุดข้อมูล IP ที่บล็อกสำเร็จแล้ว
-            applied_blocked_ips.update(all_target_ips)
-
-            # 6. สั่ง Rollout Restart ให้ Envoy Pods โหลด Config ใหม่ (กระทำเฉพาะเมื่อมี IP ใหม่เพิ่มเข้ามาเท่านั้น)
-            cmd_restart = ["kubectl", "rollout", "restart", f"deployment/{target_deployment}", "-n", NAMESPACE]
-            subprocess.run(cmd_restart, capture_output=True, text=True, timeout=15)
-            logger.info("Triggered rollout restart for %s to enforce NEW 403 blocks!", target_deployment)
         else:
-            logger.error("Failed to apply updated ConfigMap: %s", res_apply.stderr)
+            self.send_response(404)
+            self.end_headers()
 
-    except Exception as e:
-        logger.error("Error applying Envoy RBAC block: %s", e)
+    def log_message(self, format, *args):
+        """ปิด default access log เพื่อลด noise ใน stdout"""
+        pass
+
+
+def start_http_server():
+    """เปิด HTTP API server ใน daemon thread"""
+    server = http.server.HTTPServer(("0.0.0.0", HTTP_PORT), BlockedIPsHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    logger.info("🌐 HTTP API server started on port %d (GET /api/blocked-ips)", HTTP_PORT)
 
 
 # ─── Main Detection Loop ─────────────────────────────────────
 
 def main():
-    global applied_blocked_ips
-
     logger.info("=" * 60)
     logger.info("Entropy-Based DDoS/EDoS Detection Service")
     logger.info("=" * 60)
@@ -482,16 +390,21 @@ def main():
     logger.info("Pod label: %s", ENVOY_POD_LABEL)
     logger.info("Container: %s", ENVOY_CONTAINER)
     logger.info("Namespace: %s", NAMESPACE)
+    logger.info("HTTP API port: %d", HTTP_PORT)
     logger.info("=" * 60)
 
-    # โหลด IP ที่เคยบล็อกไว้แล้วจาก ConfigMap ตั้งแต่เริ่มต้น
-    applied_blocked_ips = load_currently_applied_ips_from_configmap()
-    if applied_blocked_ips:
-        logger.info("Pre-loaded %d already blocked IPs from ConfigMap: %s",
-                    len(applied_blocked_ips), list(applied_blocked_ips))
+    # โหลด IP ที่เคยบล็อกไว้จากไฟล์ (persistence ข้าม restart)
+    previously_blocked = load_blocked_ips()
+    all_blocked_ips = set(previously_blocked)
+    if all_blocked_ips:
+        update_blocked_ips(all_blocked_ips)
+        logger.info("Pre-loaded %d blocked IPs from file: %s",
+                    len(all_blocked_ips), list(all_blocked_ips))
+
+    # เปิด HTTP API server สำหรับ Envoy Lua httpCall
+    start_http_server()
 
     entropy_history = []      # เก็บ normalized entropy ย้อนหลัง
-    all_blocked_ips = set()   # เก็บ blocked IPs สะสม
     interval_count = 0
 
     while True:
@@ -579,13 +492,13 @@ def main():
                 for ip in cluster_result["suspicious"]:
                     logger.warning("    ? %s (%d requests)", ip, ip_counts.get(ip, 0))
 
-            # 7. บันทึก blocked IPs
+            # 7. บันทึก blocked IPs ลงไฟล์ (persistence)
             save_blocked_ips(list(all_blocked_ips))
 
-            # 8. บล็อกทราฟฟิกจริงผ่าน Envoy RBAC Filter
-            apply_envoy_rbac_block(list(all_blocked_ips))
+            # 8. อัปเดต HTTP API → Envoy Lua จะดึงลิสต์ใหม่ใน httpCall รอบถัดไป (ไม่ต้อง restart pod!)
+            update_blocked_ips(all_blocked_ips)
 
-            logger.warning("Total blocked IPs: %d", len(all_blocked_ips))
+            logger.warning("Total blocked IPs: %d (served via HTTP API, zero downtime)", len(all_blocked_ips))
 
         else:
             logger.info("✅ Traffic normal. Entropy %.4f >= β_lower %.4f",

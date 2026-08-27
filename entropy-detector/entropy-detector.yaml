@@ -62,6 +62,23 @@ spec:
           value: "default"
         - name: LOG_LEVEL
           value: "INFO"
+        - name: HTTP_PORT
+          value: "8080"
+        ports:
+        - containerPort: 8080
+          name: http-api
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
         resources:
           requests:
             cpu: "100m"
@@ -75,3 +92,19 @@ spec:
       volumes:
       - name: data-volume
         emptyDir: {}
+---
+# ── Service: HTTP API สำหรับ Envoy Lua httpCall ──
+apiVersion: v1
+kind: Service
+metadata:
+  name: entropy-detector-svc
+  namespace: default
+spec:
+  selector:
+    app: entropy-detector
+  ports:
+  - name: http-api
+    protocol: TCP
+    port: 8080
+    targetPort: 8080
+  type: ClusterIP

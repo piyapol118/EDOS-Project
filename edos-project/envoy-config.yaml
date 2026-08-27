@@ -46,6 +46,54 @@ data:
                   - match: { prefix: "/" }
                     route: { cluster: nginx_local_cluster }
               http_filters:
+              - name: envoy.filters.http.lua
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+                  default_source_code:
+                    inline_string: |
+                      -- Global state (persist ต่อ worker thread ตลอดชีวิตของ Envoy process)
+                      BLOCKED_IPS = BLOCKED_IPS or {}
+                      LAST_REFRESH = LAST_REFRESH or 0
+
+                      function envoy_on_request(request_handle)
+                        local now = os.time()
+                        if now - LAST_REFRESH >= 20 then
+                          local ok, _ = pcall(function()
+                            local headers, body = request_handle:httpCall(
+                              "entropy_detector_cluster",
+                              {
+                                [":method"] = "GET",
+                                [":path"] = "/api/blocked-ips",
+                                [":authority"] = "entropy-detector-svc"
+                              },
+                              "",
+                              3000
+                            )
+                            if headers[":status"] == "200" and body then
+                              local new_ips = {}
+                              for ip in body:gmatch('"(%d+%.%d+%.%d+%.%d+)"') do
+                                new_ips[ip] = true
+                              end
+                              BLOCKED_IPS = new_ips
+                              LAST_REFRESH = now
+                            end
+                          end)
+                          if not ok then
+                            request_handle:logWarn("entropy-detector unreachable, using cached blocked list")
+                          end
+                        end
+
+                        local addr = request_handle:streamInfo():downstreamDirectRemoteAddress()
+                        local ip = addr and addr:match("^(.+):%d+$")
+
+                        if ip and BLOCKED_IPS[ip] then
+                          request_handle:logWarn("BLOCKED by entropy-detector: " .. ip)
+                          request_handle:respond(
+                            {[":status"] = "403", ["content-type"] = "application/json"},
+                            '{"error":"blocked_by_entropy_detector","ip":"' .. ip .. '"}'
+                          )
+                        end
+                      end
               - name: envoy.filters.http.local_ratelimit
                 typed_config:
                   "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
@@ -83,3 +131,14 @@ data:
             - endpoint:
                 address:
                   socket_address: { address: 127.0.0.1, port_value: 80 }
+      - name: entropy_detector_cluster
+        connect_timeout: 2s
+        type: STRICT_DNS
+        lb_policy: ROUND_ROBIN
+        load_assignment:
+          cluster_name: entropy_detector_cluster
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address: { address: entropy-detector-svc, port_value: 8080 }
