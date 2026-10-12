@@ -7,15 +7,42 @@ data:
   locustfile.py: |
     import random
     import string
-    from locust import HttpUser, task, between, LoadTestShape
+    import time
+    import socket
+    import hashlib
+    import urllib3
+    from locust import HttpUser, task, LoadTestShape
+
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    # ─── คำนวณ Offset และ Rate ประจำตัว Pod ─────────────────────
+    POD_NAME = socket.gethostname()
+    POD_HASH = int(hashlib.md5(POD_NAME.encode()).hexdigest(), 16)
+    POD_OFFSET = POD_HASH % 15  # เหลื่อมเวลา 0 ถึง 14 วินาที
+
+    # สุ่มอัตราการยิงไม่เท่ากันในแต่ละ Pod (0.70x ถึง 1.40x ของค่ามาตรฐาน)
+    # ทำให้แต่ละ Pod ใน 25 Pods มีความเร็วไม่เท่ากัน กระจายตัวแบบธรรมชาติ
+    POD_RATE_FACTOR = 0.70 + ((POD_HASH >> 4) % 71) / 100.0
 
     def random_username(n=8):
         return ''.join(random.choices(string.ascii_lowercase + string.digits, k=n))
 
     class MidYoYoUser(HttpUser):
-        wait_time = between(0.3, 0.8)
         connection_timeout = 30.0
         network_timeout = 30.0
+
+        def wait_time(self):
+            # วงรอบ 15 วินาทีแบบเดียวกับ normal-traffic พร้อม POD_OFFSET
+            current_phase = int(time.time() + POD_OFFSET) % 15
+            
+            # 4 วินาทีแรก (Burst): ยิงเร่งขึ้น (~3-5 req/s)
+            # 11 วินาทีหลัง (Normal): ยิงความถี่ Medium ปกติ (~1-2 req/s)
+            if current_phase < 4:
+                mean_wait = 0.25 * POD_RATE_FACTOR
+            else:
+                mean_wait = 0.65 * POD_RATE_FACTOR
+
+            return random.expovariate(1.0 / max(mean_wait, 0.05))
 
         @task
         def attack_login_simple(self):
@@ -34,23 +61,24 @@ data:
 
     class YoYoShape(LoadTestShape):
         """
-        Yo-Yo Pattern for Medium Bots:
+        Yo-Yo Pattern for Mid Bots with Distributed Pod Offset:
         - Cycle Time: 120 seconds
-        - ON Phase (0s - 80s): 3 users per pod (Medium rate attack)
-        - OFF Phase (80s - 120s): 0 users (Cooldown phase)
+        - ON Phase (80s): 3 users per pod (Medium rate attack)
+        - OFF Phase (40s): 0 users (Cooldown phase)
+        - Staggered by POD_OFFSET across pods
         """
         CYCLE_TIME = 120
         ON_DURATION = 80
         TARGET_USERS = 3
 
         def tick(self):
-            run_time = self.get_run_time()
-            current_step = int(run_time) % self.CYCLE_TIME
+            # ใช้เวลาจริง + POD_OFFSET เพื่อให้แต่ละ Pod สลับรอบ ON/OFF เหลื่อมเวลากันเล็กน้อย
+            current_step = int(time.time() + POD_OFFSET) % self.CYCLE_TIME
 
             if current_step < self.ON_DURATION:
-                return (self.TARGET_USERS, 2)  # (target_users, spawn_rate)
+                return (self.TARGET_USERS, 2)  # ON Phase
             else:
-                return (0, 2)                  # Stop traffic during OFF phase
+                return (0, 2)                  # OFF Phase
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -58,7 +86,7 @@ metadata:
   name: locust-mid-yoyo
   namespace: default
 spec:
-  replicas: 35
+  replicas: 25
   selector:
     matchLabels:
       app: locust-mid-yoyo

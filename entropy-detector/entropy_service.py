@@ -79,7 +79,7 @@ def calculate_shannon_entropy(ip_counts: dict) -> float:
 
 def calculate_max_entropy(n_unique_ips: int) -> float:
     """
-    คำนวณค่า Entropy สูงสุดที่เป็นไปได้ (กรณีทุก IP ส่งเท่ากันหมด)
+    คำนวณค่า Entropy สูงสุดที่เป็นไปได้ 
 
     H_max = log2(n)
 
@@ -135,7 +135,7 @@ def calculate_dynamic_threshold(history: list, std_multiplier: float = 2.0) -> f
         return 0.5  # default threshold ก่อนมีข้อมูลเพียงพอ
 
     mean_h = np.mean(history)
-    std_h = np.std(history)
+    std_h = np.std(history, ddof=0) # สูตรอันนี้ใช้เห้ไร
 
     threshold = mean_h - (std_multiplier * std_h)
     return max(threshold, 0.1)  # ต่ำสุด 0.1 ไม่ให้ threshold ติดลบ
@@ -471,7 +471,7 @@ def main():
                                n_unique_ips, MIN_IPS_FOR_HISTORY, total_requests, MIN_REQUESTS_FOR_HISTORY)
 
         # เก็บแค่ 20 intervals ล่าสุด
-        if len(entropy_history) > 20:
+        if len(entropy_history) > 20:  #เก็บ 20 ชุด 
             entropy_history = entropy_history[-20:]
 
         if is_attack:

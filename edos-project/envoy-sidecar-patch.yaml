@@ -1,0 +1,33 @@
+spec:
+  template:
+    spec:
+      containers:
+      - name: envoy-sidecar
+        image: envoyproxy/envoy:v1.29-latest
+        args: ["-c", "/etc/envoy/envoy.yaml"]
+        ports:
+        - containerPort: 10000
+          name: envoy-https
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            cpu: 200m
+            memory: 64Mi
+        volumeMounts:
+        - name: envoy-config-volume
+          mountPath: /etc/envoy
+        - name: envoy-certs-volume
+          mountPath: /etc/envoy/certs
+          readOnly: true
+      volumes:
+      - name: envoy-config-volume
+        configMap:
+          name: envoy-sidecar-config
+          items:
+          - key: envoy.yaml
+            path: envoy.yaml
+      - name: envoy-certs-volume
+        secret:
+          secretName: envoy-certs

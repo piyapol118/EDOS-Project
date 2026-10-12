@@ -200,7 +200,7 @@ def evaluate_dataset(file_path: str):
         is_detected_attack = h_norm < beta_lower
         kmeans_attackers_count = 0
         if is_detected_attack: #เอา ip จัดกลุ่ม kmeans แล้วนับ attacker ใน attackers cluster
-            cluster_res = cluster_users_kmeans(ip_counts) 
+            cluster_res = cluster_users_kmeans(ip_counts)
             kmeans_attackers_count = len(cluster_res["attackers"])
         else:
             kmeans_attackers_count = 0

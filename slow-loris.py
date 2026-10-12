@@ -6,7 +6,6 @@ from locust import User, constant, task
 
 
 class SlowlorisAttacker(User):
-    # ปรับ wait_time ให้สั้นลงเพื่อให้เริ่ม task ใหม่ได้เร็วขึ้น
     wait_time = constant(0.05)
 
     def _create_connection(self, target_host, target_port):
@@ -20,8 +19,8 @@ class SlowlorisAttacker(User):
 
     @task
     def slow_loris_with_cpu(self):
-        target_host = "10.0.24.35"
-        target_port = 31984
+        target_host = "192.168.222.155"
+        target_port = 30401
 
         try:
             sock = self._create_connection(target_host, target_port)
@@ -37,7 +36,7 @@ class SlowlorisAttacker(User):
             for cycle in range(5):
                 start_time = time.time()
 
-                sock.send(f"GET /heavy-logic/ HTTP/1.1\r\n".encode("utf-8"))
+                sock.send(f"GET /heavy-logic HTTP/1.1\r\n".encode("utf-8"))
                 gevent.sleep(0.05)
 
                 sock.send(f"Host: {target_host}:{target_port}\r\n".encode("utf-8"))
@@ -67,13 +66,31 @@ class SlowlorisAttacker(User):
                     pass
 
                 elapsed = (time.time() - start_time) * 1000
-                self.environment.events.request.fire(
-                    request_type="Slowloris",
-                    name="Heavy_Request_Completed",
-                    response_time=elapsed,
-                    response_length=len(response_data),
-                    exception=None,
-                )
+
+                # Parse HTTP status code from raw response
+                status_code = 0
+                if response_data:
+                    first_line = response_data.split(b"\r\n")[0].decode("utf-8", errors="ignore")
+                    parts = first_line.split(" ")
+                    if len(parts) >= 2 and parts[1].isdigit():
+                        status_code = int(parts[1])
+
+                if status_code == 429:
+                    self.environment.events.request.fire(
+                        request_type="Slowloris",
+                        name="Heavy_Request_Completed",
+                        response_time=elapsed,
+                        response_length=len(response_data),
+                        exception=Exception("Blocked by Envoy (429 Too Many Requests)"),
+                    )
+                else:
+                    self.environment.events.request.fire(
+                        request_type="Slowloris",
+                        name="Heavy_Request_Completed",
+                        response_time=elapsed,
+                        response_length=len(response_data),
+                        exception=None,
+                    )
 
                 gevent.sleep(0.1)
 

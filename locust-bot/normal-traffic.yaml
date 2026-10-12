@@ -1,0 +1,75 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: normal-traffic-script
+  namespace: default
+data:
+  locustfile.py: |
+    import random
+    import urllib3
+    from locust import HttpUser, task, between
+
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    class NormalUser(HttpUser):
+        # ทราฟฟิกผู้ใช้งานปกติ: พัก 1.0 - 2.5 วินาที สม่ำเสมอ ไม่มีการ Burst หรือกระชาก
+        wait_time = between(1.0, 2.5)
+        connection_timeout = 30.0
+        network_timeout = 30.0
+
+        @task
+        def browse_and_login(self):
+            payload = {
+                "username": f"user_{random.randint(1000, 9999)}",
+                "password": "sample_password"
+            }
+            with self.client.post(
+                "/api/login-simple",
+                json=payload,
+                verify=False,
+                catch_response=True
+            ) as resp:
+                if resp.status_code in (200, 401):
+                    resp.success()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: normal-traffic
+  namespace: default
+spec:
+  replicas: 15
+  selector:
+    matchLabels:
+      app: normal-traffic
+  template:
+    metadata:
+      labels:
+        app: normal-traffic
+    spec:
+      containers:
+      - name: locust
+        image: locustio/locust:2.31.1
+        imagePullPolicy: IfNotPresent
+        args:
+          - "-f"
+          - "/config/locustfile.py"
+          - "--host=https://nginx-sidecar-service:80"
+          - "--headless"
+          - "--users=1"
+          - "--spawn-rate=1"
+          - "--run-time=15m"
+        volumeMounts:
+        - name: locust-script
+          mountPath: /config
+        resources:
+          requests:
+            cpu: "20m"
+            memory: "48Mi"
+          limits:
+            cpu: "50m"
+            memory: "96Mi"
+      volumes:
+      - name: locust-script
+        configMap:
+          name: normal-traffic-script

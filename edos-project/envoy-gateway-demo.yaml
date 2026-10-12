@@ -1,0 +1,144 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: envoy-gateway
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-gateway-config
+  namespace: envoy-gateway
+data:
+  envoy.yaml: |
+    admin:
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 9901 }
+    static_resources:
+      listeners:
+      - name: ingress_listener
+        address:
+          socket_address: { address: 0.0.0.0, port_value: 10000 }
+        filter_chains:
+        - filters:
+          - name: envoy.filters.network.http_connection_manager
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+              stat_prefix: ingress_http
+              use_remote_address: true
+              access_log:
+              - name: envoy.access_loggers.stdout
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                  log_format:
+                    json_format:
+                      timestamp: "%START_TIME%"
+                      client_ip: "%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%"
+                      method: "%REQ(:METHOD)%"
+                      path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
+                      host: "%REQ(:AUTHORITY)%"
+                      user_agent: "%REQ(USER-AGENT)%"
+                      status: "%RESPONSE_CODE%"
+                      duration_ms: "%DURATION%"
+                      response_flags: "%RESPONSE_FLAGS%"
+              route_config:
+                name: local_route
+                virtual_hosts:
+                - name: local_service
+                  domains: ["*"]
+                  routes:
+                  - match: { prefix: "/" }
+                    route: { cluster: nginx_backend_cluster }
+              http_filters:
+              - name: envoy.filters.http.local_ratelimit
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                  stat_prefix: http_local_rate_limiter
+                  token_bucket:
+                    max_tokens: 10
+                    tokens_per_fill: 10
+                    fill_interval: 1s
+                  filter_enabled:
+                    runtime_key: local_rate_detector
+                    default_value: { numerator: 100, denominator: HUNDRED }
+                  filter_enforced:
+                    runtime_key: local_rate_enforcer
+                    default_value: { numerator: 100, denominator: HUNDRED }
+              - name: envoy.filters.http.router
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+      clusters:
+      - name: nginx_backend_cluster
+        connect_timeout: 0.25s
+        type: STRICT_DNS
+        lb_policy: ROUND_ROBIN
+        load_assignment:
+          cluster_name: nginx_backend_cluster
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: nginx-edos-target-svc.envoy-gateway.svc.cluster.local
+                    port_value: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: envoy-gateway
+  namespace: envoy-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: envoy-gateway
+  template:
+    metadata:
+      labels:
+        app: envoy-gateway
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9901"
+        prometheus.io/path: "/stats/prometheus"
+    spec:
+      containers:
+      - name: envoy
+        image: envoyproxy/envoy:v1.30.1
+        ports:
+        - containerPort: 10000
+        - containerPort: 9901
+          name: metrics
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/envoy
+      volumes:
+      - name: config-volume
+        configMap:
+          name: envoy-gateway-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: envoy-gateway-svc
+  namespace: envoy-gateway
+spec:
+  type: NodePort
+  externalTrafficPolicy: Local
+  selector:
+    app: envoy-gateway
+  ports:
+  - name: http
+    protocol: TCP
+    port: 80
+    targetPort: 10000
+    nodePort: 31984
+  - name: metrics
+    protocol: TCP
+    port: 9901
+    targetPort: 9901

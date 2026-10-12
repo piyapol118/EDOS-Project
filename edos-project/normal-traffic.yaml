@@ -6,25 +6,16 @@ metadata:
 data:
   locustfile.py: |
     import random
-    import time
-    import socket
-    import hashlib
     import urllib3
-    from locust import HttpUser, task
+    from locust import HttpUser, task, between
 
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    POD_NAME = socket.gethostname()
-    POD_OFFSET = int(hashlib.md5(POD_NAME.encode()).hexdigest(), 16) % 15
-
-    class RealisticDistributedUser(HttpUser):
-        def wait_time(self):
-            current_phase = int(time.time() + POD_OFFSET) % 15
-            
-            if current_phase < 4:
-                return random.expovariate(1.0 / 0.15)
-            else:
-                return random.expovariate(1.0 / 1.5)
+    class NormalUser(HttpUser):
+        # ทราฟฟิกผู้ใช้งานปกติ: พัก 1.0 - 2.5 วินาที สม่ำเสมอ ไม่มีการ Burst หรือกระชาก
+        wait_time = between(1.0, 2.5)
+        connection_timeout = 30.0
+        network_timeout = 30.0
 
         @task
         def browse_and_login(self):

@@ -6,7 +6,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 class YoYoAttacker(HttpUser):
-    wait_time = constant(0)
+    wait_time = constant(0.5)
 
     def _random_ip(self):
         """Generate a random public IP address for spoofing."""
@@ -20,17 +20,17 @@ class YoYoAttacker(HttpUser):
             "X-Forwarded-For": spoofed_ip,
             "X-Real-IP": spoofed_ip,
         }
-        self.client.get("/heavy-logic/", headers=headers, verify=False)
+        self.client.get("/blank-page", headers=headers, verify=False)
 
 
 class YoYoShape(LoadTestShape):
-    CYCLE_TIME = 120 
+    CYCLE_TIME = 60 
 
     def tick(self):
         run_time = self.get_run_time()
         current_step = int(run_time) % self.CYCLE_TIME
 
-        if current_step < 90: 
-            return (1000, 100) #user, ramp up
+        if current_step < 30: 
+            return (150, 5) #user, ramp up
         else:                  
-            return (0, 50) #user, ramp down
+            return (0, 5) #user, ramp down
